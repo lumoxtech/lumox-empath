@@ -1,0 +1,12 @@
+import assert from 'node:assert/strict';
+import {coach,generalDomain,emptyMemory,verifyEffect,updateMemory} from '../index.mjs';
+const consent={emotionalHistory:true};
+let memory=emptyMemory();
+const decision=coach({text:'I am excited but frustrated with my writing',memory},consent,undefined,generalDomain);
+assert.equal(decision.state.interpretation,'mixed_signals');
+const corrected=coach({correction:'Actually I am excited. One concrete action please',memory},consent,decision,generalDomain);
+assert.equal(corrected.state.correctedInterpretation,'enthusiasm');
+memory=updateMemory(memory,verifyEffect(corrected,{useful:true}),consent);
+assert.equal(memory.responsePreference,'action');
+assert.doesNotMatch(corrected.response.action,/gym|workout|sets|reps/i);
+console.log('General-domain correction and consented feedback passed.');

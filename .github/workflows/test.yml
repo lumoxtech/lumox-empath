@@ -12,3 +12,4 @@ jobs:
           node-version: 22
       - run: npm test
       - run: node examples/fitness.mjs
+      - run: node examples/general.mjs

@@ -1,6 +1,27 @@
-// Deterministic, explainable support; signals are evidence, never an emotion diagnosis.
+import { fitnessDomain, generalDomain } from "./domains.mjs";
+import { emptyMemory, validateMemory, updateMemory } from "./memory.mjs";
+export {
+  fitnessDomain,
+  generalDomain,
+  emptyMemory,
+  validateMemory,
+  updateMemory,
+};
+
+// Rules support a decision, not a diagnosis; the host owns retention and hardware permissions.
 export const consentAllows = (consent, feature) => consent?.[feature] === true;
-const clip = (s) => String(s ?? "").slice(0, 4000);
+const clip = (value) => String(value ?? "").slice(0, 4000);
+const numeric = (value) => (Number.isFinite(value) ? value : undefined);
+const preference = (text) =>
+  /one (?:concrete )?(?:action|step)|just (?:one|tell me)|less questioning|fewer questions/.test(
+    text,
+  )
+    ? "action"
+    : /show (?:me )?(?:the )?(?:evidence|data|logs)|more analy/.test(text)
+      ? "evidence"
+      : /just listen|hear me out|space to explain/.test(text)
+        ? "listen"
+        : null;
 export function buildEvidenceBundle(input = {}, consent = {}) {
   const evidence = [];
   if (input.text)
@@ -20,11 +41,12 @@ export function buildEvidenceBundle(input = {}, consent = {}) {
       source: "checkin",
       evidenceClass: "self_reported",
       observation: {
-        energy: input.checkin.energy,
-        sleep: input.checkin.sleep,
-        soreness: input.checkin.soreness,
-        pain: input.checkin.pain,
-        motivation: input.checkin.motivation,
+        energy: numeric(input.checkin.energy),
+        sleep: numeric(input.checkin.sleep),
+        soreness: numeric(input.checkin.soreness),
+        pain: input.checkin.pain === true,
+        illness: input.checkin.illness === true,
+        motivation: numeric(input.checkin.motivation),
       },
     });
   if (input.context)
@@ -32,8 +54,8 @@ export function buildEvidenceBundle(input = {}, consent = {}) {
       source: "context",
       evidenceClass: "self_reported",
       observation: {
-        travel: Boolean(input.context.travel),
-        missed: Number(input.context.missed) || 0,
+        travel: input.context.travel === true,
+        missed: Math.max(0, numeric(input.context.missed) || 0),
       },
     });
   if (consentAllows(consent, "emotionalHistory") && input.priorCorrection)
@@ -46,18 +68,17 @@ export function buildEvidenceBundle(input = {}, consent = {}) {
     consentAllows(consent, "acoustics") &&
     Number.isFinite(input.acoustics?.baseline?.energy) &&
     input.acoustics.baseline.energy > 0 &&
-    input.acoustics?.consentedCapture === true
+    input.acoustics.consentedCapture === true
   ) {
     const { paceRatio, pauseRatio, energyRatio } = input.acoustics;
-    const ratios = Object.fromEntries(
-      Object.entries({ paceRatio, pauseRatio, energyRatio }).filter(
-        ([, v]) => Number.isFinite(v) && v >= 0,
-      ),
-    );
     evidence.push({
       source: "local_acoustics",
       evidenceClass: "measured",
-      observation: ratios,
+      observation: Object.fromEntries(
+        Object.entries({ paceRatio, pauseRatio, energyRatio }).filter(
+          ([, value]) => Number.isFinite(value) && value >= 0,
+        ),
+      ),
       limitation:
         "Relative to this user’s baseline; device and noise affect readings. No emotion inferred.",
     });
@@ -67,131 +88,213 @@ export function buildEvidenceBundle(input = {}, consent = {}) {
     retentionConsent: consentAllows(consent, "emotionalHistory"),
   };
 }
-export function tentativeState(bundle, correction) {
-  const words = bundle.evidence
-    .filter((e) => ["user_words", "declared_state"].includes(e.source))
-    .map((e) => e.observation)
-    .join(" ")
-    .toLowerCase();
-  const c =
-    bundle.evidence.find((e) => e.source === "checkin")?.observation || {};
-  const ctx =
-    bundle.evidence.find((e) => e.source === "context")?.observation || {};
-  const redFlag =
-    /chest pain|faint(?:ed|ing)?|cannot breathe|can.t breathe|severe breath|सीने में दर्द|बेहोश/.test(
+function normalise(text) {
+  return text
+    .toLowerCase()
+    .replace(/[’‘]/g, "'")
+    .replace(/\bpain[- ]free\b/g, "")
+    .replace(
+      /\b(?:no|without|not|do not have|don't have|not having)\s+(?:(?:any|new|chest|knee|back|shoulder|sharp)\s+){0,3}(?:pain|injur\w*|fever|tired|frustrat\w*|angry|excited|travell?ing)\b/g,
+      "",
+    )
+    .replace(/\b(?:dard|bukhar|chot|thakaan|thaka)\s+(?:nahi|nahin)\b/g, "")
+    .replace(/(?:दर्द|चोट|बुखार|थकान|गुस्सा|खुश)\s+नहीं/g, "");
+}
+function textSignals(text) {
+  const words = normalise(text),
+    signals = [];
+  if (
+    /chest pain|\bfaint(?:ed|ing)\b|\b(?:feel(?:ing)?|might|may|about to) faint\b|cannot breathe|can't breathe|severe breath|सीने में दर्द|बेहोश|सांस नहीं आ|seene? (?:mein|me) dard|saans nahi (?:aa|aati|le)/.test(
       words,
-    );
-  const pain =
-    c.pain === true ||
-    /\b(pain|injur\w*|illness|fever|sharp ache)\b|दर्द|चोट|बुखार/.test(
-      words.replace(/\b(no|without) pain\b/g, ""),
-    );
-  let interpretation = "uncertain";
-  if (redFlag) interpretation = "urgent_safety";
-  else if (pain) interpretation = "physical_safety";
-  else if (correction) interpretation = "user_corrected";
-  else if (
-    (Number.isFinite(c.sleep) && c.sleep < 5) ||
-    (Number.isFinite(c.energy) && c.energy <= 2) ||
-    /exhaust|fatigue|tired|थक|thak|neend/.test(
-      words.replace(/\bnot tired\b/g, ""),
     )
   )
-    interpretation = "low_recovery";
-  else if (
+    signals.push("urgent_safety");
+  if (
+    /\b(?:pain|injur\w*|illness|fever|sharp ache|dard|chot|bukhar)\b|दर्द|चोट|बुखार/.test(
+      words,
+    )
+  )
+    signals.push("physical_safety");
+  if (/\b(?:exhaust\w*|fatigu\w*|tired)\b|थक|thak|neend/.test(words))
+    signals.push("low_recovery");
+  if (
     /great.*(?:not|again)|yeah right|just perfect|fine.*(?:whatever|sure)|love.*(?:failing|missing)/.test(
       words,
     )
   )
-    interpretation = "mixed_signals";
-  else if (/excited|can.t wait|let.s go|pumped|खुश|maza|mazza/.test(words))
-    interpretation = "enthusiasm";
-  else if (
-    /frustrat|useless|fed up|nothing works|गुस्सा|bekaar|bekar|kuch nahi/.test(
+    signals.push("mixed_signals");
+  if (/excited|can't wait|let's go|pumped|खुश|maza|mazza/.test(words))
+    signals.push("enthusiasm");
+  if (
+    /frustrat|angry|useless|fed up|nothing works|गुस्सा|bekaar|bekar|kuch nahi/.test(
       words,
     )
   )
-    interpretation = "frustration";
-  else if (ctx.travel || /travel|hotel|airport|यात्रा|safar/.test(words))
-    interpretation = "travel";
-  else if (
-    ctx.missed > 0 ||
-    /missed|skip|distract|party|time nahi|mann nahi|man nahi|motivat/.test(
+    signals.push("frustration");
+  if (/travel|hotel|airport|यात्रा|safar/.test(words)) signals.push("travel");
+  if (
+    /missed|skip|distract|party|time nahi|mann nahi|man nahi|unmotivated|low motivation|no motivation|lack of motivation|overwhelm|stressed|deadline/.test(
       words,
     )
   )
-    interpretation = "barrier";
+    signals.push("barrier");
+  return signals;
+}
+const priority = [
+  "urgent_safety",
+  "physical_safety",
+  "low_recovery",
+  "mixed_signals",
+  "enthusiasm",
+  "frustration",
+  "travel",
+  "barrier",
+];
+export function tentativeState(bundle, correction) {
+  const candidates = new Map(),
+    contradictions = [];
+  const add = (interpretation, source, certainty = "tentative") => {
+    const candidate = candidates.get(interpretation) || {
+      interpretation,
+      evidenceClass: "hypothesis",
+      sources: [],
+      certainty,
+    };
+    if (!candidate.sources.includes(source)) candidate.sources.push(source);
+    if (certainty === "self_reported") candidate.certainty = certainty;
+    candidates.set(interpretation, candidate);
+  };
+  for (const e of bundle.evidence.filter((e) =>
+    ["user_words", "declared_state"].includes(e.source),
+  ))
+    for (const interpretation of textSignals(e.observation))
+      add(
+        interpretation,
+        e.source,
+        e.source === "declared_state" ? "self_reported" : "tentative",
+      );
+  const c =
+    bundle.evidence.find((e) => e.source === "checkin")?.observation || {};
+  const context =
+    bundle.evidence.find((e) => e.source === "context")?.observation || {};
+  if (c.pain || c.illness) add("physical_safety", "checkin");
+  if (
+    (Number.isFinite(c.sleep) && c.sleep < 5) ||
+    (Number.isFinite(c.energy) && c.energy <= 2) ||
+    (Number.isFinite(c.soreness) && c.soreness >= 4)
+  )
+    add("low_recovery", "checkin");
+  if (context.travel) add("travel", "context");
+  if (context.missed > 0) add("barrier", "context");
+  if (candidates.has("enthusiasm") && candidates.has("frustration"))
+    contradictions.push("enthusiasm_and_frustration");
+  if (candidates.has("enthusiasm") && candidates.has("low_recovery"))
+    contradictions.push("enthusiasm_and_low_recovery");
+  const declared = bundle.evidence.find((e) => e.source === "declared_state");
+  const explicit = declared ? textSignals(declared.observation)[0] : null;
+  let interpretation =
+    priority.find((key) => candidates.has(key)) || "uncertain";
+  const safety = ["urgent_safety", "physical_safety"].includes(interpretation);
+  if (!safety && interpretation !== "low_recovery") {
+    if (explicit) interpretation = explicit;
+    else if (contradictions.includes("enthusiasm_and_frustration"))
+      interpretation = "mixed_signals";
+  }
+  let correctedInterpretation = null;
+  if (correction && !safety) {
+    correctedInterpretation =
+      priority.find((key) => textSignals(clip(correction)).includes(key)) ||
+      "uncertain";
+    interpretation = "user_corrected";
+  }
+  const words =
+    bundle.evidence.find((e) => e.source === "user_words")?.observation || "";
+  const hypothetical =
+    !c.pain &&
+    !c.illness &&
+    /how (?:can|do) (?:i|you|we) (?:avoid|prevent)|what if|hypothetical|for example/i.test(
+      words,
+    );
   return {
     interpretation,
     evidenceClass: "hypothesis",
-    confidence: ["urgent_safety", "physical_safety"].includes(interpretation)
+    confidence: safety
       ? "precautionary"
       : correction
         ? "user_confirmed"
-        : "tentative",
+        : explicit
+          ? "self_reported"
+          : "tentative",
     correction: correction ? clip(correction) : null,
+    correctedInterpretation,
+    hypotheses: [...candidates.values()],
+    contradictions,
+    safetySignal: safety ? (hypothetical ? "hypothetical" : "reported") : null,
   };
 }
 export function needsClarification(state) {
-  return ["uncertain", "mixed_signals", "frustration", "barrier"].includes(
-    state.interpretation,
+  return (
+    [
+      "uncertain",
+      "mixed_signals",
+      "frustration",
+      "barrier",
+      "physical_safety",
+    ].includes(state.interpretation) || state.contradictions?.length > 0
   );
 }
-export function selectStrategy(state, style = "adaptive") {
-  const choices = {
-    urgent_safety: [
-      "urgent_support",
-      "Stop exercise. Seek urgent medical help now for these symptoms. Contact local emergency services if symptoms are current or severe.",
-      null,
-    ],
-    physical_safety: [
-      "protect_recovery",
-      "Pause the painful movement. Avoid loading through pain; seek qualified medical advice for new, persistent or worsening symptoms.",
-      "Which movement hurts, and is the pain new?",
-    ],
-    low_recovery: [
-      "reduce_demand",
-      "Make today a recovery session: easy walking or mobility if comfortable. Reassess sleep and energy before loading again.",
-      "Would a short walk or complete rest fit today?",
-    ],
-    mixed_signals: [
-      "confirm_meaning",
-      "I may be reading that wrong. We can keep the next step small.",
-      "Was that encouragement, frustration, or something else?",
-    ],
-    enthusiasm: [
-      "channel_energy",
-      "Use that energy for the planned session. Keep the warmup and leave a couple of reps in reserve.",
-      null,
-    ],
-    frustration: [
-      "investigate",
-      "That sounds difficult. Let’s use your actual logs before changing the plan.",
-      "Is the sticking point progress, the routine, or something outside training?",
-    ],
-    travel: [
-      "simplify_schedule",
-      "Use a short bodyweight session where you are, or reschedule the gym session. Keep the habit achievable.",
-      null,
-    ],
-    barrier: [
-      "accountability",
-      "Choose one achievable next session and protect a time for it.",
-      "What got in the way: time, energy, enjoyment, or something else?",
-    ],
-    user_corrected: [
-      "accept_correction",
-      "Thanks for correcting me. I’ll use your explanation and drop the earlier interpretation.",
-      "What would be the most useful next step?",
-    ],
-    uncertain: [
-      "listen",
-      "We can work from what you tell me and what you’ve actually logged.",
-      "What would help most today: a session, recovery, or talking through a barrier?",
-    ],
-  };
-  const [strategy, action, clarification] =
-    choices[state.interpretation] || choices.uncertain;
+function domainFor(domain) {
+  if (
+    !domain ||
+    typeof domain.id !== "string" ||
+    !/^[a-z0-9_-]{1,60}$/.test(domain.id) ||
+    !domain.strategies?.uncertain
+  )
+    throw Error("Provide a domain ID and an uncertain-response strategy.");
+  return domain;
+}
+export function selectStrategy(
+  state,
+  style = "adaptive",
+  domain = fitnessDomain,
+) {
+  domainFor(domain);
+  const safety = ["urgent_safety", "physical_safety"].includes(
+    state.interpretation,
+  );
+  const selected =
+    state.interpretation === "user_corrected" &&
+    state.correctedInterpretation !== "uncertain"
+      ? state.correctedInterpretation
+      : state.interpretation;
+  const table =
+    safety && domain.id !== "fitness"
+      ? generalDomain.strategies
+      : domain.strategies;
+  const choice = table[selected] || domain.strategies.uncertain;
+  if (
+    !Array.isArray(choice) ||
+    typeof choice[0] !== "string" ||
+    typeof choice[1] !== "string" ||
+    choice[1].length > 4000 ||
+    (choice[2] !== null && typeof choice[2] !== "string")
+  )
+    throw Error("Invalid domain response strategy.");
+  let [strategy, action, clarification] = choice;
+  if (state.interpretation === "user_corrected") {
+    strategy = "accept_correction";
+    action =
+      "Thanks for correcting me. I’ll drop the earlier interpretation. " +
+      action;
+  }
+  if (
+    state.contradictions?.includes("enthusiasm_and_low_recovery") &&
+    !safety
+  ) {
+    action = "You reported enthusiasm alongside low recovery. " + action;
+    clarification =
+      "Would you prefer rest or a genuinely lighter commitment today?";
+  }
   return {
     strategy,
     action,
@@ -208,22 +311,46 @@ export function selectStrategy(state, style = "adaptive") {
 export function ingestCorrection(previous, text) {
   if (!String(text || "").trim())
     throw Error("A correction needs your explanation.");
+  const bundle = {
+    ...previous.bundle,
+    evidence: [
+      ...previous.bundle.evidence.filter(
+        (e) => !["user_words", "declared_state"].includes(e.source),
+      ),
+      {
+        source: "user_words",
+        evidenceClass: "self_reported",
+        observation: clip(text),
+      },
+    ],
+  };
   return {
     ...previous,
-    state: tentativeState(previous.bundle, text),
+    bundle,
+    state: tentativeState(bundle, text),
     correction: clip(text),
-    supersedes: previous.state.interpretation,
+    responsePreference: preference(normalise(clip(text))),
+    supersedes:
+      previous.state.correctedInterpretation || previous.state.interpretation,
   };
 }
 export function decisionTrace(decision, consent = {}) {
   return {
-    version: 1,
+    version: 2,
+    domain: decision.domain,
     evidenceClasses: decision.bundle.evidence.map((e) => ({
       source: e.source,
       evidenceClass: e.evidenceClass,
     })),
     interpretation: decision.state.interpretation,
     uncertainty: decision.state.confidence,
+    hypotheses: decision.state.hypotheses.map((h) => ({
+      interpretation: h.interpretation,
+      sources: h.sources,
+      certainty: h.certainty,
+    })),
+    contradictions: decision.state.contradictions,
+    correctedInterpretation: decision.state.correctedInterpretation,
     strategy: decision.response.strategy,
     retentionConsent: consentAllows(consent, "emotionalHistory"),
     corrected: Boolean(decision.correction),
@@ -235,25 +362,100 @@ export function decisionTrace(decision, consent = {}) {
       : null,
   };
 }
-export function coach(input = {}, consent = {}, previous) {
+export function coach(
+  input = {},
+  consent = {},
+  previous,
+  domain = fitnessDomain,
+) {
+  domainFor(domain);
   const bundle = buildEvidenceBundle(input, consent);
-  let decision = { bundle, state: tentativeState(bundle) };
-  if (previous && input.correction)
-    decision = ingestCorrection({ ...previous, bundle }, input.correction);
-  decision.response = selectStrategy(decision.state, input.style);
-  if (
-    previous?.followUp?.nextStrategy === "ask_user_preference" &&
-    !["urgent_safety", "physical_safety"].includes(
-      decision.state.interpretation,
+  let decision = {
+    id: crypto.randomUUID(),
+    domain: domain.id,
+    bundle,
+    state: tentativeState(bundle),
+  };
+  if (previous && input.correction) {
+    const currentState = decision.state;
+    decision = ingestCorrection(
+      { ...previous, id: decision.id, domain: domain.id, bundle },
+      input.correction,
+    );
+    if (
+      ["urgent_safety", "physical_safety"].includes(currentState.interpretation)
+    ) {
+      decision.state = currentState;
+      decision.bundle = bundle;
+    }
+  }
+  decision.response = selectStrategy(decision.state, input.style, domain);
+  const memory = consentAllows(consent, "emotionalHistory")
+    ? validateMemory(input.memory)
+    : emptyMemory();
+  const explicitPreference = ["action", "evidence", "listen"].includes(
+    input.responsePreference,
+  )
+    ? input.responsePreference
+    : null;
+  const responsePreference =
+    explicitPreference ||
+    decision.responsePreference ||
+    previous?.responsePreference ||
+    memory.responsePreference ||
+    (consentAllows(consent, "emotionalHistory")
+      ? preference(normalise(clip(input.priorCorrection)))
+      : null);
+  decision.responsePreference = responsePreference;
+  const safety = ["urgent_safety", "physical_safety"].includes(
+    decision.state.interpretation,
+  );
+  const outcomes = memory.outcomes
+    .filter(
+      (o) =>
+        o.domain === domain.id && o.context === decision.state.interpretation,
     )
+    .slice(-2);
+  if (
+    !safety &&
+    (previous?.followUp?.nextStrategy === "ask_user_preference" ||
+      (outcomes.length === 2 && outcomes.every((o) => !o.useful))) &&
+    !responsePreference
   ) {
     decision.response = {
       ...decision.response,
       strategy: "ask_user_preference",
       clarification:
-        "Would one concrete action, a review of your logs, or space to explain help more?",
+        "Would one concrete action, a review of the evidence, or space to explain help more?",
     };
   }
+  if (
+    responsePreference === "action" &&
+    !safety &&
+    decision.state.interpretation !== "mixed_signals"
+  )
+    decision.response.clarification = null;
+  if (responsePreference === "evidence" && !safety)
+    decision.response = {
+      ...decision.response,
+      action:
+        "Evidence available: " +
+        (bundle.evidence.map((e) => e.source.replaceAll("_", " ")).join(", ") ||
+          "no recorded input") +
+        ". Interpretation: " +
+        decision.state.interpretation.replaceAll("_", " ") +
+        " (" +
+        decision.state.confidence +
+        "). " +
+        decision.response.action,
+    };
+  if (responsePreference === "listen" && !safety)
+    decision.response = {
+      ...decision.response,
+      strategy: "listen",
+      action: "I’ll leave room for your explanation before suggesting a plan.",
+      clarification: "What would you like me to understand?",
+    };
   decision.trace = decisionTrace(decision, consent);
   return decision;
 }

@@ -21,3 +21,7 @@ Follow **observe → facts vs hypotheses → context → clarify → intervene �
 For software integration, the accompanying SDK exposes `buildEvidenceBundle`, `tentativeState`, `needsClarification`, `selectStrategy`, `ingestCorrection`, `coach`, `verifyEffect`, `consentAllows` and `decisionTrace`. Use only metadata traces unless sensitive-content retention is expressly allowed. Its rules are a deterministic baseline, not a psychological classifier or a language model.
 
 Example: “I missed the gym because I’m travelling” → acknowledge the stated constraint, offer a short travel session or reschedule, and verify the chosen next step. “No, I’m excited, not angry” → accept the correction rather than treating vocal energy as proof of anger.
+
+Use `generalDomain` or an explicit domain adapter outside fitness. Keep competing interpretations visible and state contradictions when they change the proposed action. Never assume a user’s past mood is their present state.
+
+Use `updateMemory` and `validateMemory` for consented metadata retention. Keep emotional corrections turn-scoped; carry forward only explicit response preferences and context-specific usefulness feedback. Delete the host’s saved memory when consent is revoked. The default bounded memory excludes raw conversation, audio and outcome text. Offer action, evidence or listening preferences without requiring emotional-history retention.
