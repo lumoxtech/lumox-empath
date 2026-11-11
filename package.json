@@ -1,0 +1,10 @@
+{
+  "name": "@lumox/empath",
+  "version": "1.0.0",
+  "type": "module",
+  "exports": "./index.mjs",
+  "license": "MIT",
+  "scripts": {
+    "test": "node --test *.test.mjs"
+  }
+}
